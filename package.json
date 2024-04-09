@@ -3,7 +3,12 @@
 	"module": "src/index.ts",
 	"type": "module",
 	"types": "src/types.d.ts",
+	"scripts": {
+		"start": "bun src/index.ts",
+		"pdf": "sh scripts/md-to-pdf.sh"
+	},
 	"devDependencies": {
+		"@biomejs/biome": "^1.6.4",
 		"@types/bun": "^1.0.5"
 	},
 	"peerDependencies": {

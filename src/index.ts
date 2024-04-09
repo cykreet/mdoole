@@ -1,6 +1,8 @@
 import puppeteer from "puppeteer";
-import { COURSE_ID, HOST_URL, MICROSOFT_LOGIN_EMAIL, MICROSOFT_LOGIN_PASSWORD, OUT_DIRECTORY } from "./constants";
+import { COURSE_IDS, COURSE_IMAGE_REGEX, HOST_URL, OUT_DIRECTORY } from "./constants";
+import { authenticateMicrosoft } from "./helpers/authenticate-microsoft";
 import { cleanFileName } from "./helpers/clean-file-name";
+import { ViewEndpoint, getCourseViews } from "./helpers/get-course-views";
 import { writeViewMarkdown } from "./helpers/write-view-markdown";
 
 const browser = await puppeteer.launch({
@@ -10,58 +12,62 @@ const page = await browser.newPage();
 await page.setRequestInterception(true);
 page.on("request", (request) => request.continue());
 page.on("response", async (response) => {
-	const imageMatch = response.url().match(/.*\.(png|jpg|jpeg|gif|webp)/);
-	if (response.url().includes("mod_page/content") && imageMatch && imageMatch.length > 0) {
+	const courseImageMatch = COURSE_IMAGE_REGEX.test(response.url());
+	if (courseImageMatch) {
 		const fileName = response.url().split("/").pop();
 		if (fileName == undefined) return;
 		const cleanName = cleanFileName(fileName);
 		const buffer = await response.buffer();
-		await Bun.write(`${OUT_DIRECTORY}/${COURSE_ID}/images/${cleanName}`, buffer);
+		await Bun.write(`${OUT_DIRECTORY}/images/${cleanName}`, buffer);
 	}
 });
 
-await page.goto(`${HOST_URL}/login/index.php`);
-const email = MICROSOFT_LOGIN_EMAIL;
-const password = MICROSOFT_LOGIN_PASSWORD;
-const notLoggedIn = await page.waitForRequest((request) => request.url().includes("login.microsoftonline.com"), { timeout: 4000 }).catch(() => false);
-const existingLogin = await page.waitForSelector(`div[data-test-id='${email}`, { timeout: 4000 }).catch(() => false);
-if (notLoggedIn) {
-	if (existingLogin && typeof existingLogin === "object") {
-		await existingLogin?.click();
-		const passwordInput = await page.waitForSelector("input[type=password]");
-		await passwordInput?.type(password);
-		const signInButton = await page.waitForSelector("input[value='Sign in']");
-		await signInButton?.click();
-
-		const staySignedInButton = await page.waitForSelector("input[value='Yes']");
-		await staySignedInButton?.click();
-	} else {
-		const emailInput = await page.waitForSelector("input[type=email]");
-		await emailInput?.type(email);
-		const nextButton = await page.waitForSelector("input[value='Next']");
-		await nextButton?.click();
-
-		const passwordInput = await page.waitForSelector("input[type=password]");
-		await passwordInput?.type(password);
-		const signInButton = await page.waitForSelector("input[value='Sign in']");
-		await signInButton?.click();
-
-		const staySignedInButton = await page.waitForSelector("input[value='Yes']");
-		await staySignedInButton?.click();
-	}
-}
-
-await page.goto(`${HOST_URL}/course/view.php?id=${COURSE_ID}`);
-await new Promise((resolve) => setTimeout(resolve, 3000));
-const viewIds = await page.$$eval("a[href*='mod/page/view.php?id=']", (els) => els.map((el) => el.getAttribute("href")));
-if (viewIds.length === 0) throw new Error("No view ids found");
-for (const viewId of viewIds) {
-	if (viewId == null) continue;
-	const id = viewId.split("id=").pop();
-	if (id == undefined) continue;
-	await writeViewMarkdown(page, `${OUT_DIRECTORY}/${COURSE_ID}`, id);
-	console.log(`Wrote markdown for view id: ${id}`);
+await authenticateMicrosoft(page);
+for (const courseId of COURSE_IDS) {
+	const courseViews = await getCourseViews(page, courseId);
 	await new Promise((resolve) => setTimeout(resolve, 3000));
+	if (courseViews[0] == null) {
+		console.error(`(${courseId}) Could not find valid course views`);
+		continue;
+	}
+
+	for (const courseView of courseViews) {
+		if (courseView == null) continue;
+		const courseUrl = `${HOST_URL}/${courseView.endpoint}?id=${courseView.id}`;
+		console.log(`Navigating to course view: ${courseUrl}`);
+		await page.goto(courseUrl);
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+
+		if (courseView.endpoint === ViewEndpoint.BOOK) {
+			const chapterSection = await page.waitForSelector("div.book_toc");
+			if (chapterSection == null) {
+				console.error("Could not find chapter section");
+				continue;
+			}
+
+			// write initial view markdown
+			await writeViewMarkdown(page, `${OUT_DIRECTORY}/${courseId}`, true);
+			console.log(`(${courseId}) Wrote markdown for view: ${courseView.id}`);
+
+			const chapterLinks = await chapterSection.$$eval("a", (elements) =>
+				elements.map((element) => element.getAttribute("href")),
+			);
+
+			for (const chapterLink of chapterLinks) {
+				if (chapterLink == null) continue;
+				await page.goto(`${HOST_URL}/${courseView.endpoint}/${chapterLink}`);
+				await new Promise((resolve) => setTimeout(resolve, 3000));
+				await writeViewMarkdown(page, `${OUT_DIRECTORY}/${courseId}`, true);
+				const chapterId = chapterLink.split("chapterid=").pop();
+				console.log(`(${courseId}) Wrote markdown for view, chapter id: ${courseView.id}, ${chapterId}`);
+			}
+
+			continue;
+		}
+
+		await writeViewMarkdown(page, `${OUT_DIRECTORY}/${courseId}`);
+		console.log(`(${courseId}) Wrote markdown for view id: ${courseView.id}`);
+	}
 }
 
 await browser.close();
